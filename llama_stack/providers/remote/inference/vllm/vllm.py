@@ -79,6 +79,8 @@ def build_hf_repo_model_entries():
         )
         for model in all_registered_models()
         if model.huggingface_repo
+    ] + [
+        build_model_alias("granite-3-8b-instruct", "Granite-3.1-8B-Instruct")
     ]
 
 
