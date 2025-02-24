@@ -48,6 +48,7 @@ from llama_stack.providers.datatypes import ModelsProtocolPrivate
 from llama_stack.providers.utils.inference.model_registry import (
     ModelRegistryHelper,
     build_hf_repo_model_entry,
+    build_model_entry,
 )
 from llama_stack.providers.utils.inference.openai_compat import (
     OpenAICompatCompletionResponse,
@@ -80,7 +81,7 @@ def build_hf_repo_model_entries():
         for model in all_registered_models()
         if model.huggingface_repo
     ] + [
-        build_model_alias("granite-3-8b-instruct", "Granite-3.1-8B-Instruct")
+        build_model_entry("granite-3-8b-instruct", "Granite-3.1-8B-Instruct")
     ]
 
 
