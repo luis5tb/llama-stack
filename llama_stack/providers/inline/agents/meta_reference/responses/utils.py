@@ -17,6 +17,8 @@ from llama_stack.apis.agents.openai_responses import (
     OpenAIResponseOutputMessageContent,
     OpenAIResponseOutputMessageContentOutputText,
     OpenAIResponseOutputMessageFunctionToolCall,
+    OpenAIResponseOutputMessageMCPCall,
+    OpenAIResponseOutputMessageMCPListTools,
     OpenAIResponseText,
 )
 from llama_stack.apis.inference import (
@@ -117,6 +119,25 @@ async def convert_response_input_to_chat_messages(
                     ),
                 )
                 messages.append(OpenAIAssistantMessageParam(tool_calls=[tool_call]))
+            elif isinstance(input_item, OpenAIResponseOutputMessageMCPListTools):
+                # Handle MCP list tools messages - these don't have content but represent tool discovery
+                # Convert to a system-like message indicating tools were discovered
+                tool_count = len(input_item.tools)
+                content_text = f"Discovered {tool_count} tools from MCP server '{input_item.server_label}'"
+                messages.append(OpenAIAssistantMessageParam(content=content_text))
+            elif isinstance(input_item, OpenAIResponseOutputMessageMCPCall):
+                # Handle MCP call messages - these don't have content but represent tool calls to MCP servers
+                # Convert to a readable message indicating the tool call was made
+                if input_item.output:
+                    # Successful tool call
+                    content_text = f"Called MCP tool '{input_item.name}' on server '{input_item.server_label}': {input_item.output}"
+                elif input_item.error:
+                    # Failed tool call
+                    content_text = f"MCP tool '{input_item.name}' on server '{input_item.server_label}' failed: {input_item.error}"
+                else:
+                    # Tool call in progress or completed without output
+                    content_text = f"Called MCP tool '{input_item.name}' on server '{input_item.server_label}'"
+                messages.append(OpenAIAssistantMessageParam(content=content_text))
             else:
                 content = await convert_response_content_to_chat_content(input_item.content)
                 message_type = await get_message_type_by_role(input_item.role)
