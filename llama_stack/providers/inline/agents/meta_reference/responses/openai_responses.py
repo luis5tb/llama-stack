@@ -75,21 +75,28 @@ class OpenAIResponsesImpl:
         previous_response_id: str | None = None,
     ):
         if previous_response_id:
-            previous_response_with_input = await self.responses_store.get_response_object(previous_response_id)
+            try:
+                previous_response_with_input = await self.responses_store.get_response_object(previous_response_id)
 
-            # previous response input items
-            new_input_items = previous_response_with_input.input
+                # previous response input items
+                new_input_items = previous_response_with_input.input
 
-            # previous response output items
-            new_input_items.extend(previous_response_with_input.output)
+                # previous response output items
+                new_input_items.extend(previous_response_with_input.output)
 
-            # new input items from the current request
-            if isinstance(input, str):
-                new_input_items.append(OpenAIResponseMessage(content=input, role="user"))
-            else:
-                new_input_items.extend(input)
+                # new input items from the current request
+                if isinstance(input, str):
+                    new_input_items.append(OpenAIResponseMessage(content=input, role="user"))
+                else:
+                    new_input_items.extend(input)
 
-            input = new_input_items
+                input = new_input_items
+            except Exception as e:
+                # If we can't load the previous response (e.g., due to schema issues with MCP tools),
+                # log the error but continue without conversation chaining
+                # This ensures the request doesn't fail completely
+                print(f"Warning: Could not load previous response {previous_response_id} for chaining: {e}")
+                print("Continuing without conversation context...")
 
         return input
 
