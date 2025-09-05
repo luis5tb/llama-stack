@@ -724,11 +724,13 @@ OpenAIResponseInput = Annotated[
     OpenAIResponseOutputMessageWebSearchToolCall
     | OpenAIResponseOutputMessageFileSearchToolCall
     | OpenAIResponseOutputMessageFunctionToolCall
+    | OpenAIResponseOutputMessageMCPCall
+    | OpenAIResponseOutputMessageMCPListTools
     | OpenAIResponseInputFunctionToolCallOutput
     |
     # Fallback to the generic message type as a last resort
     OpenAIResponseMessage,
-    Field(union_mode="left_to_right"),
+    Field(discriminator="type"),
 ]
 register_schema(OpenAIResponseInput, name="OpenAIResponseInput")
 
