@@ -652,10 +652,32 @@ async def convert_message_to_openai_dict_new(
             **params,
         )
     elif isinstance(message, ToolResponseMessage):
+        # For tool response messages, OpenAI expects simple string content, not structured content
+        # Convert the content to a simple string representation
+        if isinstance(message.content, str):
+            content_str = message.content
+        elif isinstance(message.content, list):
+            # If it's a list, try to extract text content
+            content_parts = []
+            for item in message.content:
+                if isinstance(item, str):
+                    content_parts.append(item)
+                elif isinstance(item, TextContentItem):
+                    content_parts.append(item.text)
+                else:
+                    # For other content types, convert to string representation
+                    content_parts.append(str(item))
+            content_str = " ".join(content_parts)
+        elif isinstance(message.content, TextContentItem):
+            content_str = message.content.text
+        else:
+            # Fallback to string representation
+            content_str = str(message.content)
+
         out = OpenAIChatCompletionToolMessage(
             role="tool",
             tool_call_id=message.call_id,
-            content=await _convert_message_content(message.content),
+            content=content_str,
         )
     elif isinstance(message, SystemMessage):
         out = OpenAIChatCompletionSystemMessage(
@@ -903,10 +925,11 @@ def _convert_openai_request_response_format(
 
 
 def _convert_openai_tool_calls(
-    tool_calls: list[OpenAIChatCompletionMessageFunctionToolCall],
+    tool_calls: list[OpenAIChatCompletionMessageFunctionToolCall] | list[ToolCall],
 ) -> list[ToolCall]:
     """
     Convert an OpenAI ChatCompletionMessageToolCall list into a list of ToolCall.
+    If already ToolCall objects, return them as-is.
 
     OpenAI ChatCompletionMessageToolCall:
         id: str
@@ -927,6 +950,11 @@ def _convert_openai_tool_calls(
     if not tool_calls:
         return []  # CompletionMessage tool_calls is not optional
 
+    # Check if we already have ToolCall objects (Llama Stack internal type)
+    if tool_calls and isinstance(tool_calls[0], ToolCall):
+        return tool_calls  # Already in the correct format
+
+    # Convert from OpenAI format to ToolCall format
     return [
         ToolCall(
             call_id=call.id,
@@ -998,13 +1026,25 @@ def _convert_openai_sampling_params(
 
 
 def openai_messages_to_messages(
-    messages: list[OpenAIMessageParam],
+    messages: list[OpenAIMessageParam] | list[Message],
 ) -> list[Message]:
     """
     Convert a list of OpenAIChatCompletionMessage into a list of Message.
+    If already Message objects, return them as-is.
     """
+    # Check if we already have Message objects (Llama Stack internal type)
+    if messages and hasattr(messages[0], '__dataclass_fields__'):
+        # Already in the correct Llama Stack format
+        return messages
+
     converted_messages = []
     for message in messages:
+        # Check if this individual message is already a Llama Stack Message
+        if hasattr(message, '__dataclass_fields__'):
+            # Already a Llama Stack Message, use as-is
+            converted_messages.append(message)
+            continue
+
         if message.role == "system":
             converted_message = SystemMessage(content=openai_content_to_content(message.content))
         elif message.role == "user":
@@ -1016,9 +1056,11 @@ def openai_messages_to_messages(
                 stop_reason=StopReason.end_of_turn,
             )
         elif message.role == "tool":
+            # Handle both OpenAI format (tool_call_id) and Llama Stack format (call_id)
+            tool_call_id = getattr(message, 'tool_call_id', None) or getattr(message, 'call_id', None)
             converted_message = ToolResponseMessage(
                 role="tool",
-                call_id=message.tool_call_id,
+                call_id=tool_call_id,
                 content=openai_content_to_content(message.content),
             )
         else:
