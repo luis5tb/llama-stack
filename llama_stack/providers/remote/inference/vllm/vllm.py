@@ -68,9 +68,10 @@ from llama_stack.providers.utils.inference.model_registry import (
 )
 from llama_stack.providers.utils.inference.openai_compat import (
     UnparseableToolCall,
-    convert_message_to_openai_dict,
+    convert_message_to_openai_dict_new,
     convert_tool_call,
     get_sampling_options,
+    openai_messages_to_messages,
     prepare_openai_completion_params,
     process_chat_completion_stream_response,
     process_completion_response,
@@ -512,7 +513,25 @@ class VLLMInferenceAdapter(Inference, ModelsProtocolPrivate):
             input_dict = {"tools": _convert_to_vllm_tools_in_request(request.tools)}
 
         if isinstance(request, ChatCompletionRequest):
-            input_dict["messages"] = [await convert_message_to_openai_dict(m, download=True) for m in request.messages]
+            # Handle both cases: when messages are already Message objects, or when they're OpenAIMessageParam objects
+            # (this can happen when called from the responses API)
+            messages_to_convert = request.messages
+
+            # Check if we have OpenAIMessageParam objects that need to be converted to Message objects first
+            # We detect this by checking if the first message has typical OpenAIMessageParam attributes
+            # but isn't a Llama Stack Message object
+            if (messages_to_convert and
+                hasattr(messages_to_convert[0], 'role') and
+                (hasattr(messages_to_convert[0], 'tool_call_id') or  # Tool message
+                 'OpenAI' in str(type(messages_to_convert[0])) or
+                 not hasattr(messages_to_convert[0], '__dataclass_fields__'))):  # Not a Llama Stack Message
+
+                log.info(f"VLLM DEBUG: Converting {len(messages_to_convert)} OpenAIMessageParam objects to Message objects")
+                # Convert OpenAIMessageParam to Message objects first
+                messages_to_convert = openai_messages_to_messages(messages_to_convert)
+
+            # Now convert Message objects to OpenAI dict format
+            input_dict["messages"] = [await convert_message_to_openai_dict_new(m, download_images=True) for m in messages_to_convert]
         else:
             assert not request_has_media(request), "vLLM does not support media for Completion requests"
             input_dict["prompt"] = await completion_request_to_prompt(request)
