@@ -354,24 +354,29 @@ class ToolExecutor:
         input_message = None
         if result and result.content:
             if isinstance(result.content, str):
-                content = result.content
+                content_str = result.content
             elif isinstance(result.content, list):
-                content = []
+                # Convert content parts to simple string for tool messages
+                content_parts = []
                 for item in result.content:
                     if isinstance(item, TextContentItem):
-                        part = OpenAIChatCompletionContentPartTextParam(text=item.text)
+                        content_parts.append(item.text)
                     elif isinstance(item, ImageContentItem):
                         if item.image.data:
                             url = f"data:image;base64,{item.image.data}"
                         else:
                             url = item.image.url
-                        part = OpenAIChatCompletionContentPartImageParam(image_url=OpenAIImageURL(url=url))
+                        content_parts.append(OpenAIChatCompletionContentPartImageParam(image_url=OpenAIImageURL(url=url)))
                     else:
-                        raise ValueError(f"Unknown result content type: {type(item)}")
-                    content.append(part)
+                        # Fallback: convert unknown content to string
+                        content_parts.append(str(item))
+                content_str = "\n".join(content_parts) if len(content_parts) > 1 else (content_parts[0] if content_parts else "")
             else:
-                raise ValueError(f"Unknown result content type: {type(result.content)}")
-            input_message = OpenAIToolMessageParam(content=content, tool_call_id=tool_call_id)
+                # Fallback: convert unknown content types to string
+                content_str = str(result.content)
+
+            # OpenAI tool messages must have simple string content, not complex content structures
+            input_message = OpenAIToolMessageParam(content=content_str, tool_call_id=tool_call_id)
         else:
             text = str(error_exc) if error_exc else "Tool execution failed"
             input_message = OpenAIToolMessageParam(content=text, tool_call_id=tool_call_id)
