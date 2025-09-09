@@ -63,8 +63,8 @@ from llama_stack.providers.utils.inference.model_registry import (
 )
 from llama_stack.providers.utils.inference.openai_compat import (
     UnparseableToolCall,
-    convert_message_to_openai_dict,
     convert_openai_chat_completion_stream,
+    convert_message_to_openai_dict_new,
     convert_tool_call,
     get_sampling_options,
     process_chat_completion_stream_response,
@@ -528,7 +528,9 @@ class VLLMInferenceAdapter(OpenAIMixin, LiteLLMOpenAIMixin, Inference, ModelsPro
             input_dict = {"tools": _convert_to_vllm_tools_in_request(request.tools)}
 
         if isinstance(request, ChatCompletionRequest):
-            input_dict["messages"] = [await convert_message_to_openai_dict(m, download=True) for m in request.messages]
+            input_dict["messages"] = [
+                await convert_message_to_openai_dict_new(m, download_images=True) for m in request.messages
+            ]
         else:
             assert not request_has_media(request), "vLLM does not support media for Completion requests"
             input_dict["prompt"] = await completion_request_to_prompt(request)
