@@ -33,6 +33,10 @@ class VLLMInferenceAdapterConfig(BaseModel):
         default=False,
         description="Whether to refresh models periodically",
     )
+    use_responses_endpoint: bool = Field(
+        default=False,
+        description="Whether to use vLLM's /v1/responses endpoint instead of /v1/chat/completions when possible",
+    )
 
     @field_validator("tls_verify")
     @classmethod
@@ -58,4 +62,5 @@ class VLLMInferenceAdapterConfig(BaseModel):
             "max_tokens": "${env.VLLM_MAX_TOKENS:=4096}",
             "api_token": "${env.VLLM_API_TOKEN:=fake}",
             "tls_verify": "${env.VLLM_TLS_VERIFY:=true}",
+            "use_responses_endpoint": "${env.VLLM_USE_RESPONSES_ENDPOINT:=false}",
         }

@@ -13,6 +13,17 @@ from openai.types.chat.chat_completion_chunk import (
     ChatCompletionChunk as OpenAIChatCompletionChunk,
 )
 
+from llama_stack.apis.agents.openai_responses import (
+    ListOpenAIResponseInputItem,
+    ListOpenAIResponseObject,
+    OpenAIDeleteResponseObject,
+    OpenAIResponseInput,
+    OpenAIResponseInputTool,
+    OpenAIResponseObject,
+    OpenAIResponseObjectStream,
+    OpenAIResponseText,
+    Order,
+)
 from llama_stack.apis.common.content_types import (
     InterleavedContent,
     InterleavedContentItem,
@@ -536,3 +547,330 @@ class VLLMInferenceAdapter(OpenAIMixin, Inference, ModelsProtocolPrivate):
 
         embeddings = [data.embedding for data in response.data]
         return EmbeddingsResponse(embeddings=embeddings)
+
+    # OpenAI Responses API passthrough methods
+    # 
+    # These methods provide direct HTTP passthrough to vLLM's /v1/responses endpoint,
+    # maintaining the Responses API format end-to-end without translation to chat/completions.
+    # This enables:
+    # - Direct Responses API communication with vLLM
+    # - Support for all Responses API features including MCP tool calling
+    # - Streaming and non-streaming response modes
+    # - Full compatibility with OpenAI Responses API specification
+    #
+    # The implementation follows the same patterns as the existing LlamaStack responses
+    # implementation but bypasses format conversion, sending requests directly to vLLM's
+    # native Responses API endpoints.
+    async def create_openai_response(
+        self,
+        input: str | list[OpenAIResponseInput],
+        model: str,
+        instructions: str | None = None,
+        previous_response_id: str | None = None,
+        store: bool | None = True,
+        stream: bool | None = False,
+        temperature: float | None = None,
+        text: OpenAIResponseText | None = None,
+        tools: list[OpenAIResponseInputTool] | None = None,
+        include: list[str] | None = None,
+        max_infer_iters: int | None = 10,
+    ):
+        """Create a new OpenAI Response via direct passthrough to vLLM's /v1/responses endpoint.
+
+        This method provides end-to-end Responses API format communication with vLLM,
+        bypassing the typical chat/completions translation. It supports all Responses API
+        features including MCP tool calling, function tools, file search, and web search.
+
+        Args:
+            input: Input message(s) or conversation history in Responses API format
+            model: Model identifier to use for generation
+            instructions: Optional system instructions to prepend to the conversation
+            previous_response_id: ID of previous response to continue the conversation
+            store: Whether to store the response for future retrieval (default: True)
+            stream: Whether to stream the response (default: False)
+            temperature: Sampling temperature for generation (0.0 to 2.0)
+            text: Text formatting configuration for structured outputs
+            tools: List of tools available for the model to call (function, MCP, file_search, web_search)
+            include: Additional fields to include in the response
+            max_infer_iters: Maximum number of inference iterations for multi-step reasoning
+
+        Returns:
+            OpenAIResponseObject: Complete response object (if stream=False)
+            AsyncGenerator[OpenAIResponseObjectStream]: Stream of response chunks (if stream=True)
+
+        Raises:
+            httpx.HTTPStatusError: If vLLM returns an HTTP error
+            ValueError: If the streaming response never completes (non-streaming mode)
+
+        Example:
+            # Non-streaming response
+            response = await provider.create_openai_response(
+                input="What is the weather like?",
+                model="llama-3-8b",
+                tools=[web_search_tool],
+                stream=False
+            )
+
+            # Streaming response  
+            async for chunk in await provider.create_openai_response(
+                input="Tell me a story",
+                model="llama-3-8b", 
+                stream=True
+            ):
+                print(chunk.type, chunk.delta if hasattr(chunk, 'delta') else chunk.response)
+        """
+        stream = bool(stream)
+
+        stream_gen = self._create_streaming_openai_response(
+            input=input,
+            model=model,
+            instructions=instructions,
+            previous_response_id=previous_response_id,
+            store=store,
+            temperature=temperature,
+            text=text,
+            tools=tools,
+            include=include,
+            max_infer_iters=max_infer_iters,
+        )
+
+        if stream:
+            return stream_gen
+        else:
+            response = None
+            async for stream_chunk in stream_gen:
+                if stream_chunk.type == "response.completed":
+                    if response is not None:
+                        raise ValueError("The response stream completed multiple times! Earlier response: {response}")
+                    response = stream_chunk.response
+                    # don't leave the generator half complete!
+
+            if response is None:
+                raise ValueError("The response stream never completed")
+            return response
+
+    async def _create_streaming_openai_response(
+        self,
+        input: str | list[OpenAIResponseInput],
+        model: str,
+        instructions: str | None = None,
+        previous_response_id: str | None = None,
+        store: bool | None = True,
+        temperature: float | None = None,
+        text: OpenAIResponseText | None = None,
+        tools: list[OpenAIResponseInputTool] | None = None,
+        include: list[str] | None = None,
+        max_infer_iters: int | None = 10,
+    ):
+        """Internal method to handle streaming response from vLLM."""
+        # Prepare the request payload
+        payload = {
+            "input": input,
+            "model": model,
+            "stream": True,  # Always stream internally to handle both cases
+        }
+
+        # Add optional parameters if provided
+        if instructions is not None:
+            payload["instructions"] = instructions
+        if previous_response_id is not None:
+            payload["previous_response_id"] = previous_response_id
+        if store is not None:
+            payload["store"] = store
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if text is not None:
+            payload["text"] = text.model_dump() if hasattr(text, 'model_dump') else text
+        if tools is not None:
+            payload["tools"] = [tool.model_dump() if hasattr(tool, 'model_dump') else tool for tool in tools]
+        if include is not None:
+            payload["include"] = include
+        if max_infer_iters is not None:
+            payload["max_infer_iters"] = max_infer_iters
+
+        # Make direct HTTP call to vLLM's /v1/responses endpoint
+        url = f"{self.config.url.rstrip('/')}/v1/responses"
+        headers = {"Content-Type": "application/json"}
+        if self.config.api_token:
+            headers["Authorization"] = f"Bearer {self.config.api_token}"
+
+        async with httpx.AsyncClient(verify=self.config.tls_verify) as client:
+            async with client.stream("POST", url, json=payload, headers=headers) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.strip():
+                        if line.startswith("data: "):
+                            line = line[6:]  # Remove "data: " prefix
+                        if line.strip() == "[DONE]":
+                            break
+                        try:
+                            chunk_data = json.loads(line)
+                            yield OpenAIResponseObjectStream(**chunk_data)
+                        except json.JSONDecodeError:
+                            continue
+
+    async def get_openai_response(
+        self,
+        response_id: str,
+    ) -> OpenAIResponseObject:
+        """Retrieve a stored OpenAI Response by ID via direct passthrough to vLLM.
+
+        Args:
+            response_id: Unique identifier of the response to retrieve
+
+        Returns:
+            OpenAIResponseObject: The requested response object with all metadata
+
+        Raises:
+            httpx.HTTPStatusError: If vLLM returns an HTTP error (e.g., 404 if not found)
+
+        Example:
+            response = await provider.get_openai_response("resp-abc123")
+            print(f"Response status: {response.status}")
+            print(f"Output: {response.output}")
+        """
+        url = f"{self.config.url.rstrip('/')}/v1/responses/{response_id}"
+        headers = {}
+        if self.config.api_token:
+            headers["Authorization"] = f"Bearer {self.config.api_token}"
+
+        async with httpx.AsyncClient(verify=self.config.tls_verify) as client:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            return OpenAIResponseObject(**response.json())
+
+    async def list_openai_responses(
+        self,
+        after: str | None = None,
+        limit: int | None = 50,
+        model: str | None = None,
+        order: Order | None = Order.desc,
+    ) -> ListOpenAIResponseObject:
+        """List stored OpenAI Responses with pagination via direct passthrough to vLLM.
+
+        Args:
+            after: Cursor for pagination - list responses after this ID
+            limit: Maximum number of responses to return (default: 50)
+            model: Filter responses by model identifier
+            order: Sort order for responses (asc/desc, default: desc)
+
+        Returns:
+            ListOpenAIResponseObject: Paginated list of response objects with metadata
+
+        Raises:
+            httpx.HTTPStatusError: If vLLM returns an HTTP error
+
+        Example:
+            # List recent responses
+            responses = await provider.list_openai_responses(limit=10)
+            for response in responses.data:
+                print(f"Response {response.id}: {response.status}")
+
+            # Paginate through responses
+            next_page = await provider.list_openai_responses(
+                after=responses.last_id,
+                limit=10
+            )
+        """
+        url = f"{self.config.url.rstrip('/')}/v1/responses"
+        params = {}
+        if after is not None:
+            params["after"] = after
+        if limit is not None:
+            params["limit"] = limit
+        if model is not None:
+            params["model"] = model
+        if order is not None:
+            params["order"] = order.value if hasattr(order, 'value') else str(order)
+
+        headers = {}
+        if self.config.api_token:
+            headers["Authorization"] = f"Bearer {self.config.api_token}"
+
+        async with httpx.AsyncClient(verify=self.config.tls_verify) as client:
+            response = await client.get(url, params=params, headers=headers)
+            response.raise_for_status()
+            return ListOpenAIResponseObject(**response.json())
+
+    async def list_openai_response_input_items(
+        self,
+        response_id: str,
+        after: str | None = None,
+        before: str | None = None,
+        include: list[str] | None = None,
+        limit: int | None = 20,
+        order: Order | None = Order.desc,
+    ) -> ListOpenAIResponseInputItem:
+        """List input items for a specific response via direct passthrough to vLLM.
+
+        Args:
+            response_id: ID of the response to retrieve input items for
+            after: Cursor for pagination - list items after this ID
+            before: Cursor for pagination - list items before this ID  
+            include: Additional fields to include in the response
+            limit: Maximum number of items to return (default: 20)
+            order: Sort order for items (asc/desc, default: desc)
+
+        Returns:
+            ListOpenAIResponseInputItem: Paginated list of input items
+
+        Raises:
+            httpx.HTTPStatusError: If vLLM returns an HTTP error
+
+        Example:
+            # Get input items for a response
+            input_items = await provider.list_openai_response_input_items(
+                response_id="resp-abc123",
+                limit=5
+            )
+            for item in input_items.data:
+                print(f"Input item: {item.content}")
+        """
+        url = f"{self.config.url.rstrip('/')}/v1/responses/{response_id}/input_items"
+        params = {}
+        if after is not None:
+            params["after"] = after
+        if before is not None:
+            params["before"] = before
+        if include is not None:
+            params["include"] = include
+        if limit is not None:
+            params["limit"] = limit
+        if order is not None:
+            params["order"] = order.value if hasattr(order, 'value') else str(order)
+
+        headers = {}
+        if self.config.api_token:
+            headers["Authorization"] = f"Bearer {self.config.api_token}"
+
+        async with httpx.AsyncClient(verify=self.config.tls_verify) as client:
+            response = await client.get(url, params=params, headers=headers)
+            response.raise_for_status()
+            return ListOpenAIResponseInputItem(**response.json())
+
+    async def delete_openai_response(self, response_id: str) -> OpenAIDeleteResponseObject:
+        """Delete a stored OpenAI Response via direct passthrough to vLLM.
+
+        Args:
+            response_id: ID of the response to delete
+
+        Returns:
+            OpenAIDeleteResponseObject: Confirmation of deletion
+
+        Raises:
+            httpx.HTTPStatusError: If vLLM returns an HTTP error (e.g., 404 if not found)
+
+        Example:
+            # Delete a response
+            result = await provider.delete_openai_response("resp-abc123")
+            print(f"Deleted: {result.deleted}")  # True
+        """
+        url = f"{self.config.url.rstrip('/')}/v1/responses/{response_id}"
+        headers = {}
+        if self.config.api_token:
+            headers["Authorization"] = f"Bearer {self.config.api_token}"
+
+        async with httpx.AsyncClient(verify=self.config.tls_verify) as client:
+            response = await client.delete(url, headers=headers)
+            response.raise_for_status()
+            return OpenAIDeleteResponseObject(**response.json())

@@ -9,6 +9,7 @@ import json
 import time
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
+import httpx
 import pytest
 from openai.types.chat.chat_completion_chunk import (
     ChatCompletionChunk as OpenAIChatCompletionChunk,
@@ -27,6 +28,17 @@ from openai.types.chat.chat_completion_chunk import (
 )
 from openai.types.model import Model as OpenAIModel
 
+from llama_stack.apis.agents.openai_responses import (
+    ListOpenAIResponseInputItem,
+    ListOpenAIResponseObject,
+    OpenAIDeleteResponseObject,
+    OpenAIResponseInputToolFunction,
+    OpenAIResponseInputToolMCP,
+    OpenAIResponseObject,
+    OpenAIResponseObjectStreamResponseCompleted,
+    OpenAIResponseObjectStreamResponseCreated,
+    Order,
+)
 from llama_stack.apis.inference import (
     ChatCompletionRequest,
     ChatCompletionResponseEventType,
@@ -656,3 +668,426 @@ async def test_openai_chat_completion_is_async(vllm_inference_adapter):
 
         assert mock_create_client.call_count == 4  # no cheating
         assert total_time < (sleep_time * 2), f"Total time taken: {total_time}s exceeded expected max"
+
+
+# OpenAI Responses API Tests
+# These tests verify the direct passthrough functionality to vLLM's /v1/responses endpoint
+
+
+@pytest.fixture
+def mock_httpx_response():
+    """Create a mock httpx.Response for testing."""
+    response = MagicMock()
+    response.raise_for_status = MagicMock()
+    response.json = MagicMock()
+    return response
+
+
+@pytest.fixture
+def mock_httpx_stream_response():
+    """Create a mock httpx streaming response for testing."""
+    response = MagicMock()
+    response.raise_for_status = MagicMock()
+
+    async def mock_aiter_lines():
+        # Simulate streaming response lines
+        lines = [
+            'data: {"type": "response.created", "response": {"id": "resp-123", "status": "in_progress"}}',
+            'data: {"type": "response.output_text.delta", "delta": "Hello"}',
+            'data: {"type": "response.completed", "response": {"id": "resp-123", "status": "completed"}}'
+        ]
+        for line in lines:
+            yield line
+
+    response.aiter_lines = mock_aiter_lines
+    return response
+
+
+async def test_create_openai_response_non_streaming(vllm_inference_adapter):
+    """Test creating a non-streaming OpenAI response."""
+    mock_response_data = {
+        "id": "resp-123",
+        "object": "response",
+        "created_at": 1234567890,
+        "model": "test-model",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hello, world!"}]
+            }
+        ]
+    }
+
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        mock_client_class.return_value.__aexit__.return_value = None
+
+        # Mock the streaming response to return completed response
+        async def mock_stream():
+            yield OpenAIResponseObjectStreamResponseCompleted(
+                type="response.completed",
+                response=OpenAIResponseObject(**mock_response_data)
+            )
+
+        with patch.object(vllm_inference_adapter, '_create_streaming_openai_response', return_value=mock_stream()):
+            response = await vllm_inference_adapter.create_openai_response(
+                input="Test message",
+                model="test-model",
+                stream=False
+            )
+
+            assert isinstance(response, OpenAIResponseObject)
+            assert response.id == "resp-123"
+            assert response.status == "completed"
+
+
+async def test_create_openai_response_streaming(vllm_inference_adapter):
+    """Test creating a streaming OpenAI response."""
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        mock_client_class.return_value.__aexit__.return_value = None
+
+        # Mock the streaming response
+        async def mock_stream():
+            yield OpenAIResponseObjectStreamResponseCreated(
+                type="response.created",
+                response=OpenAIResponseObject(
+                    id="resp-123",
+                    object="response",
+                    created_at=1234567890,
+                    model="test-model",
+                    status="in_progress",
+                    output=[]
+                )
+            )
+
+        with patch.object(vllm_inference_adapter, '_create_streaming_openai_response', return_value=mock_stream()):
+            response_gen = await vllm_inference_adapter.create_openai_response(
+                input="Test message",
+                model="test-model",
+                stream=True
+            )
+
+            chunks = [chunk async for chunk in response_gen]
+            assert len(chunks) == 1
+            assert chunks[0].type == "response.created"
+
+
+async def test_create_openai_response_with_tools(vllm_inference_adapter):
+    """Test creating a response with various tool types including MCP."""
+    function_tool = OpenAIResponseInputToolFunction(
+        type="function",
+        name="get_weather",
+        description="Get weather information",
+        parameters={"type": "object", "properties": {"location": {"type": "string"}}}
+    )
+
+    mcp_tool = OpenAIResponseInputToolMCP(
+        type="mcp",
+        server_label="test-server",
+        server_url="http://localhost:8080",
+        require_approval="never"
+    )
+
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        mock_client_class.return_value.__aexit__.return_value = None
+
+        # Mock the streaming response
+        async def mock_stream():
+            yield OpenAIResponseObjectStreamResponseCompleted(
+                type="response.completed",
+                response=OpenAIResponseObject(
+                    id="resp-123",
+                    object="response",
+                    created_at=1234567890,
+                    model="test-model",
+                    status="completed",
+                    output=[]
+                )
+            )
+
+        with patch.object(vllm_inference_adapter, '_create_streaming_openai_response', return_value=mock_stream()):
+            response = await vllm_inference_adapter.create_openai_response(
+                input="What's the weather like?",
+                model="test-model",
+                tools=[function_tool, mcp_tool],
+                stream=False
+            )
+
+            assert isinstance(response, OpenAIResponseObject)
+            assert response.status == "completed"
+
+
+async def test_create_streaming_openai_response_http_passthrough(vllm_inference_adapter):
+    """Test the internal streaming method makes correct HTTP calls."""
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        mock_client_class.return_value.__aexit__.return_value = None
+
+        # Mock the streaming context manager
+        mock_stream_response = AsyncMock()
+        mock_stream_response.raise_for_status = MagicMock()
+
+        async def mock_aiter_lines():
+            lines = [
+                'data: {"type": "response.created", "response": {"id": "resp-123", "object": "response", "created_at": 1234567890, "model": "test-model", "status": "in_progress", "output": []}}',
+                'data: {"type": "response.completed", "response": {"id": "resp-123", "object": "response", "created_at": 1234567890, "model": "test-model", "status": "completed", "output": []}}'
+            ]
+            for line in lines:
+                yield line
+
+        mock_stream_response.aiter_lines = mock_aiter_lines
+        mock_client.stream.return_value.__aenter__.return_value = mock_stream_response
+        mock_client.stream.return_value.__aexit__.return_value = None
+
+        chunks = []
+        async for chunk in vllm_inference_adapter._create_streaming_openai_response(
+            input="Test message",
+            model="test-model",
+            temperature=0.7
+        ):
+            chunks.append(chunk)
+
+        # Verify HTTP call was made correctly
+        mock_client.stream.assert_called_once()
+        call_args = mock_client.stream.call_args
+        assert call_args[0][0] == "POST"
+        assert call_args[0][1] == "http://mocked.localhost:12345/v1/responses"
+        assert call_args[1]["json"]["input"] == "Test message"
+        assert call_args[1]["json"]["model"] == "test-model"
+        assert call_args[1]["json"]["temperature"] == 0.7
+        assert call_args[1]["json"]["stream"] is True
+
+        # Verify response parsing
+        assert len(chunks) == 2
+        assert chunks[0].type == "response.created"
+        assert chunks[1].type == "response.completed"
+
+
+async def test_get_openai_response(vllm_inference_adapter):
+    """Test retrieving a specific OpenAI response by ID."""
+    mock_response_data = {
+        "id": "resp-123",
+        "object": "response",
+        "created_at": 1234567890,
+        "model": "test-model",
+        "status": "completed",
+        "output": []
+    }
+
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        mock_client_class.return_value.__aexit__.return_value = None
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = mock_response_data
+        mock_client.get.return_value = mock_response
+
+        response = await vllm_inference_adapter.get_openai_response("resp-123")
+
+        # Verify HTTP call
+        mock_client.get.assert_called_once_with(
+            "http://mocked.localhost:12345/v1/responses/resp-123",
+            headers={}
+        )
+
+        # Verify response
+        assert isinstance(response, OpenAIResponseObject)
+        assert response.id == "resp-123"
+        assert response.status == "completed"
+
+
+async def test_list_openai_responses(vllm_inference_adapter):
+    """Test listing OpenAI responses with pagination."""
+    mock_list_data = {
+        "object": "list",
+        "data": [
+            {
+                "id": "resp-123",
+                "object": "response",
+                "created_at": 1234567890,
+                "model": "test-model",
+                "status": "completed",
+                "output": [],
+                "input": []
+            }
+        ],
+        "has_more": False,
+        "first_id": "resp-123",
+        "last_id": "resp-123"
+    }
+
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        mock_client_class.return_value.__aexit__.return_value = None
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = mock_list_data
+        mock_client.get.return_value = mock_response
+
+        responses = await vllm_inference_adapter.list_openai_responses(
+            limit=10,
+            order=Order.desc,
+            model="test-model"
+        )
+
+        # Verify HTTP call with parameters
+        mock_client.get.assert_called_once()
+        call_args = mock_client.get.call_args
+        assert call_args[0][0] == "http://mocked.localhost:12345/v1/responses"
+        assert call_args[1]["params"]["limit"] == 10
+        assert call_args[1]["params"]["model"] == "test-model"
+        assert call_args[1]["params"]["order"] == "desc"
+
+        # Verify response
+        assert isinstance(responses, ListOpenAIResponseObject)
+        assert len(responses.data) == 1
+        assert responses.data[0].id == "resp-123"
+
+
+async def test_list_openai_response_input_items(vllm_inference_adapter):
+    """Test listing input items for a specific response."""
+    mock_input_data = {
+        "object": "list",
+        "data": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Hello"}],
+                "id": "msg-123"
+            }
+        ]
+    }
+
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        mock_client_class.return_value.__aexit__.return_value = None
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = mock_input_data
+        mock_client.get.return_value = mock_response
+
+        input_items = await vllm_inference_adapter.list_openai_response_input_items(
+            response_id="resp-123",
+            limit=5
+        )
+
+        # Verify HTTP call
+        mock_client.get.assert_called_once()
+        call_args = mock_client.get.call_args
+        assert call_args[0][0] == "http://mocked.localhost:12345/v1/responses/resp-123/input_items"
+        assert call_args[1]["params"]["limit"] == 5
+
+        # Verify response
+        assert isinstance(input_items, ListOpenAIResponseInputItem)
+        assert len(input_items.data) == 1
+
+
+async def test_delete_openai_response(vllm_inference_adapter):
+    """Test deleting an OpenAI response."""
+    mock_delete_data = {
+        "id": "resp-123",
+        "object": "response",
+        "deleted": True
+    }
+
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        mock_client_class.return_value.__aexit__.return_value = None
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = mock_delete_data
+        mock_client.delete.return_value = mock_response
+
+        result = await vllm_inference_adapter.delete_openai_response("resp-123")
+
+        # Verify HTTP call
+        mock_client.delete.assert_called_once_with(
+            "http://mocked.localhost:12345/v1/responses/resp-123",
+            headers={}
+        )
+
+        # Verify response
+        assert isinstance(result, OpenAIDeleteResponseObject)
+        assert result.id == "resp-123"
+        assert result.deleted is True
+
+
+async def test_responses_api_with_authentication(vllm_inference_adapter):
+    """Test that API token is properly included in headers."""
+    # Set up adapter with API token
+    vllm_inference_adapter.config.api_token = "test-token"
+
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        mock_client_class.return_value.__aexit__.return_value = None
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"id": "resp-123", "object": "response", "deleted": True}
+        mock_client.delete.return_value = mock_response
+
+        await vllm_inference_adapter.delete_openai_response("resp-123")
+
+        # Verify authorization header is included
+        mock_client.delete.assert_called_once()
+        call_args = mock_client.delete.call_args
+        assert call_args[1]["headers"]["Authorization"] == "Bearer test-token"
+
+
+async def test_responses_api_http_error_handling(vllm_inference_adapter):
+    """Test that HTTP errors are properly propagated."""
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        mock_client_class.return_value.__aexit__.return_value = None
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "404 Not Found", request=MagicMock(), response=MagicMock()
+        )
+        mock_client.get.return_value = mock_response
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await vllm_inference_adapter.get_openai_response("nonexistent-resp")
+
+
+async def test_create_openai_response_stream_never_completes(vllm_inference_adapter):
+    """Test error handling when streaming response never completes."""
+    async def mock_stream():
+        # Stream that never yields a completed response
+        yield OpenAIResponseObjectStreamResponseCreated(
+            type="response.created",
+            response=OpenAIResponseObject(
+                id="resp-123",
+                object="response",
+                created_at=1234567890,
+                model="test-model",
+                status="in_progress",
+                output=[]
+            )
+        )
+
+    with patch.object(vllm_inference_adapter, '_create_streaming_openai_response', return_value=mock_stream()):
+        with pytest.raises(ValueError, match="The response stream never completed"):
+            await vllm_inference_adapter.create_openai_response(
+                input="Test message",
+                model="test-model",
+                stream=False
+            )
