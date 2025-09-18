@@ -688,14 +688,17 @@ class VLLMInferenceAdapter(OpenAIMixin, Inference, ModelsProtocolPrivate):
         if max_infer_iters is not None:
             payload["max_infer_iters"] = max_infer_iters
 
-        # Make direct HTTP call to vLLM's /v1/responses endpoint
-        url = f"{self.config.url.rstrip('/')}/v1/responses"
+        # Use the same HTTP client pattern as other methods but with the responses endpoint
+        url = f"{self.get_base_url().rstrip('/')}/responses"
         headers = {"Content-Type": "application/json"}
-        if self.config.api_token:
-            headers["Authorization"] = f"Bearer {self.config.api_token}"
+        if self.get_api_key():
+            headers["Authorization"] = f"Bearer {self.get_api_key()}"
 
-        async with httpx.AsyncClient(verify=self.config.tls_verify) as client:
-            async with client.stream("POST", url, json=payload, headers=headers) as response:
+        # Use the HTTP client from the OpenAI client for consistency
+        http_client = self.client._client if hasattr(self.client, '_client') else httpx.AsyncClient(verify=self.config.tls_verify)
+        
+        try:
+            async with http_client.stream("POST", url, json=payload, headers=headers) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if line.strip():
@@ -708,6 +711,10 @@ class VLLMInferenceAdapter(OpenAIMixin, Inference, ModelsProtocolPrivate):
                             yield OpenAIResponseObjectStream(**chunk_data)
                         except json.JSONDecodeError:
                             continue
+        finally:
+            # Only close if we created our own client
+            if not hasattr(self.client, '_client'):
+                await http_client.aclose()
 
     async def get_openai_response(
         self,
@@ -729,15 +736,22 @@ class VLLMInferenceAdapter(OpenAIMixin, Inference, ModelsProtocolPrivate):
             print(f"Response status: {response.status}")
             print(f"Output: {response.output}")
         """
-        url = f"{self.config.url.rstrip('/')}/v1/responses/{response_id}"
+        url = f"{self.get_base_url().rstrip('/')}/responses/{response_id}"
         headers = {}
-        if self.config.api_token:
-            headers["Authorization"] = f"Bearer {self.config.api_token}"
+        if self.get_api_key():
+            headers["Authorization"] = f"Bearer {self.get_api_key()}"
 
-        async with httpx.AsyncClient(verify=self.config.tls_verify) as client:
-            response = await client.get(url, headers=headers)
+        # Use the HTTP client from the OpenAI client for consistency
+        http_client = self.client._client if hasattr(self.client, '_client') else httpx.AsyncClient(verify=self.config.tls_verify)
+        
+        try:
+            response = await http_client.get(url, headers=headers)
             response.raise_for_status()
             return OpenAIResponseObject(**response.json())
+        finally:
+            # Only close if we created our own client
+            if not hasattr(self.client, '_client'):
+                await http_client.aclose()
 
     async def list_openai_responses(
         self,
@@ -772,7 +786,7 @@ class VLLMInferenceAdapter(OpenAIMixin, Inference, ModelsProtocolPrivate):
                 limit=10
             )
         """
-        url = f"{self.config.url.rstrip('/')}/v1/responses"
+        url = f"{self.get_base_url().rstrip('/')}/responses"
         params = {}
         if after is not None:
             params["after"] = after
@@ -784,13 +798,20 @@ class VLLMInferenceAdapter(OpenAIMixin, Inference, ModelsProtocolPrivate):
             params["order"] = order.value if hasattr(order, 'value') else str(order)
 
         headers = {}
-        if self.config.api_token:
-            headers["Authorization"] = f"Bearer {self.config.api_token}"
+        if self.get_api_key():
+            headers["Authorization"] = f"Bearer {self.get_api_key()}"
 
-        async with httpx.AsyncClient(verify=self.config.tls_verify) as client:
-            response = await client.get(url, params=params, headers=headers)
+        # Use the HTTP client from the OpenAI client for consistency
+        http_client = self.client._client if hasattr(self.client, '_client') else httpx.AsyncClient(verify=self.config.tls_verify)
+        
+        try:
+            response = await http_client.get(url, params=params, headers=headers)
             response.raise_for_status()
             return ListOpenAIResponseObject(**response.json())
+        finally:
+            # Only close if we created our own client
+            if not hasattr(self.client, '_client'):
+                await http_client.aclose()
 
     async def list_openai_response_input_items(
         self,
@@ -826,7 +847,7 @@ class VLLMInferenceAdapter(OpenAIMixin, Inference, ModelsProtocolPrivate):
             for item in input_items.data:
                 print(f"Input item: {item.content}")
         """
-        url = f"{self.config.url.rstrip('/')}/v1/responses/{response_id}/input_items"
+        url = f"{self.get_base_url().rstrip('/')}/responses/{response_id}/input_items"
         params = {}
         if after is not None:
             params["after"] = after
@@ -840,13 +861,20 @@ class VLLMInferenceAdapter(OpenAIMixin, Inference, ModelsProtocolPrivate):
             params["order"] = order.value if hasattr(order, 'value') else str(order)
 
         headers = {}
-        if self.config.api_token:
-            headers["Authorization"] = f"Bearer {self.config.api_token}"
+        if self.get_api_key():
+            headers["Authorization"] = f"Bearer {self.get_api_key()}"
 
-        async with httpx.AsyncClient(verify=self.config.tls_verify) as client:
-            response = await client.get(url, params=params, headers=headers)
+        # Use the HTTP client from the OpenAI client for consistency
+        http_client = self.client._client if hasattr(self.client, '_client') else httpx.AsyncClient(verify=self.config.tls_verify)
+        
+        try:
+            response = await http_client.get(url, params=params, headers=headers)
             response.raise_for_status()
             return ListOpenAIResponseInputItem(**response.json())
+        finally:
+            # Only close if we created our own client
+            if not hasattr(self.client, '_client'):
+                await http_client.aclose()
 
     async def delete_openai_response(self, response_id: str) -> OpenAIDeleteResponseObject:
         """Delete a stored OpenAI Response via direct passthrough to vLLM.
@@ -865,12 +893,19 @@ class VLLMInferenceAdapter(OpenAIMixin, Inference, ModelsProtocolPrivate):
             result = await provider.delete_openai_response("resp-abc123")
             print(f"Deleted: {result.deleted}")  # True
         """
-        url = f"{self.config.url.rstrip('/')}/v1/responses/{response_id}"
+        url = f"{self.get_base_url().rstrip('/')}/responses/{response_id}"
         headers = {}
-        if self.config.api_token:
-            headers["Authorization"] = f"Bearer {self.config.api_token}"
+        if self.get_api_key():
+            headers["Authorization"] = f"Bearer {self.get_api_key()}"
 
-        async with httpx.AsyncClient(verify=self.config.tls_verify) as client:
-            response = await client.delete(url, headers=headers)
+        # Use the HTTP client from the OpenAI client for consistency
+        http_client = self.client._client if hasattr(self.client, '_client') else httpx.AsyncClient(verify=self.config.tls_verify)
+        
+        try:
+            response = await http_client.delete(url, headers=headers)
             response.raise_for_status()
             return OpenAIDeleteResponseObject(**response.json())
+        finally:
+            # Only close if we created our own client
+            if not hasattr(self.client, '_client'):
+                await http_client.aclose()

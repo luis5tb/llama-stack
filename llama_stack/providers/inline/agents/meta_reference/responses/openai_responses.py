@@ -227,6 +227,10 @@ class OpenAIResponsesImpl:
         input = await self._prepend_previous_response(input, previous_response_id)
         
         # Check if inference provider supports Responses API (e.g., vLLM)
+        logger.info(f"Inference API type: {type(self.inference_api)}")
+        logger.info(f"Inference API class: {self.inference_api.__class__.__name__}")
+        logger.info(f"Has create_openai_response: {hasattr(self.inference_api, 'create_openai_response')}")
+        
         if hasattr(self.inference_api, 'create_openai_response'):
             # Use native Responses API - no conversion to chat messages
             logger.info(f"Using native Responses API for model {model}")
