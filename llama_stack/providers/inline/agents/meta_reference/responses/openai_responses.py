@@ -225,6 +225,53 @@ class OpenAIResponsesImpl:
     ) -> AsyncIterator[OpenAIResponseObjectStream]:
         # Input preprocessing
         input = await self._prepend_previous_response(input, previous_response_id)
+        
+        # Check if inference provider supports Responses API (e.g., vLLM)
+        if hasattr(self.inference_api, 'create_openai_response'):
+            # Use native Responses API - no conversion to chat messages
+            logger.info(f"Using native Responses API for model {model}")
+            
+            # Prepend instructions as a system message in the input
+            if instructions:
+                instruction_input = {
+                    "type": "message",
+                    "role": "system", 
+                    "content": instructions
+                }
+                if isinstance(input, list):
+                    input = [instruction_input] + input
+                else:
+                    input = [instruction_input, {"type": "message", "role": "user", "content": input}]
+            
+            # Call the inference provider's native Responses API
+            response_stream = await self.inference_api.create_openai_response(
+                input=input,
+                model=model,
+                temperature=temperature,
+                text=text,
+                tools=tools,
+                include=None,
+                max_infer_iters=max_infer_iters,
+                stream=True,
+            )
+            
+            # Stream the response directly from vLLM
+            final_response = None
+            async for stream_chunk in response_stream:
+                if stream_chunk.type == "response.completed":
+                    final_response = stream_chunk.response
+                yield stream_chunk
+                
+            # Store the response if requested
+            if store and final_response:
+                await self._store_response(
+                    response=final_response,
+                    input=input,
+                )
+            return
+        
+        # Fallback to chat completion translation for providers without Responses API
+        logger.info(f"Using chat completion fallback for model {model}")
         messages = await convert_response_input_to_chat_messages(input)
         await self._prepend_instructions(messages, instructions)
 
