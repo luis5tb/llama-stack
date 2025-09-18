@@ -22,7 +22,6 @@ from llama_stack.apis.agents.openai_responses import (
     OpenAIResponseObject,
     OpenAIResponseObjectStream,
     OpenAIResponseText,
-    Order,
 )
 from llama_stack.apis.common.content_types import (
     InterleavedContent,
@@ -31,6 +30,7 @@ from llama_stack.apis.common.content_types import (
     ToolCallDelta,
     ToolCallParseStatus,
 )
+from llama_stack.apis.common.responses import Order
 from llama_stack.apis.inference import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -549,7 +549,7 @@ class VLLMInferenceAdapter(OpenAIMixin, Inference, ModelsProtocolPrivate):
         return EmbeddingsResponse(embeddings=embeddings)
 
     # OpenAI Responses API passthrough methods
-    # 
+    #
     # These methods provide direct HTTP passthrough to vLLM's /v1/responses endpoint,
     # maintaining the Responses API format end-to-end without translation to chat/completions.
     # This enables:
@@ -611,10 +611,10 @@ class VLLMInferenceAdapter(OpenAIMixin, Inference, ModelsProtocolPrivate):
                 stream=False
             )
 
-            # Streaming response  
+            # Streaming response
             async for chunk in await provider.create_openai_response(
                 input="Tell me a story",
-                model="llama-3-8b", 
+                model="llama-3-8b",
                 stream=True
             ):
                 print(chunk.type, chunk.delta if hasattr(chunk, 'delta') else chunk.response)

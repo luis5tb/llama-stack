@@ -37,8 +37,8 @@ from llama_stack.apis.agents.openai_responses import (
     OpenAIResponseObject,
     OpenAIResponseObjectStreamResponseCompleted,
     OpenAIResponseObjectStreamResponseCreated,
-    Order,
 )
+from llama_stack.apis.common.responses import Order
 from llama_stack.apis.inference import (
     ChatCompletionRequest,
     ChatCompletionResponseEventType,
