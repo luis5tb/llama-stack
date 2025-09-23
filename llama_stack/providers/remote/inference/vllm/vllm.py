@@ -63,8 +63,8 @@ from llama_stack.providers.utils.inference.model_registry import (
 )
 from llama_stack.providers.utils.inference.openai_compat import (
     UnparseableToolCall,
-    convert_openai_chat_completion_stream,
     convert_message_to_openai_dict_new,
+    convert_openai_chat_completion_stream,
     convert_tool_call,
     get_sampling_options,
     process_chat_completion_stream_response,
